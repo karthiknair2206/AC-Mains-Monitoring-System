@@ -1,33 +1,37 @@
 #include "stm32f4xx_hal.h"
 
 int main(void) {
-    // 1. Initialize the HAL and the 1ms timer
     HAL_Init();
 
-    // 2. Wake up Port C by enabling its clock
+    // Enable the hardware clocks for both Port C and Port A
     __HAL_RCC_GPIOC_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
 
-    // 3. Create a configuration struct and set up PC13
+    // Configure PC13 for the onboard LED
     GPIO_InitTypeDef GPIO_InitStruct = {0};
     GPIO_InitStruct.Pin = GPIO_PIN_13;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP; 
     GPIO_InitStruct.Pull = GPIO_NOPULL;         
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    
-    // Apply the struct settings to Port C
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-    // 4. The main application loop
+    // Reuse the exact same struct configuration, but apply it to PA2 for the buzzer
+    GPIO_InitStruct.Pin = GPIO_PIN_2;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
     while (1) {
-        // Toggle the onboard LED
+        // Toggle the onboard LED (PC13)
         HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);  
         
+        // Toggle the active buzzer (PA2)
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_2);   
+        
         // Wait 500 milliseconds
-        HAL_Delay(1000);                         
+        HAL_Delay(500);                         
     }
 }
 
-// 5. Background interrupt that increments the 1ms timer
+// System timer interrupt handler
 void SysTick_Handler(void) {
     HAL_IncTick();
 }
