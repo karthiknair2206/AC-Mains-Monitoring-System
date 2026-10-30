@@ -7,7 +7,7 @@ DMA_HandleTypeDef hdma_adc1;
 TIM_HandleTypeDef htim3;
 
 // --- SYSTEM VARIABLES ---
-#define BUFFER_SIZE 160 // 80 samples per cycle (40 Voltage, 40 Current)
+#define BUFFER_SIZE 320 // 80 samples per cycle (40 Voltage, 40 Current)
 volatile uint16_t adc_buffer[BUFFER_SIZE];
 volatile uint8_t process_first_half = 0;
 volatile uint8_t process_second_half = 0;
@@ -51,34 +51,50 @@ int main(void) {
             double v_sum = 0, i_sum = 0;
             
             // 1. Calculate dynamic DC Offset (Mean) for this exact 20ms cycle
-            for(int i = 0; i < 40; i++) {
-                v_sum += adc_buffer[start_idx + (i*2)];     // Even indices = PA0 (Voltage)
-                i_sum += adc_buffer[start_idx + (i*2) + 1]; // Odd indices = PA1 (Current)
+            for(int i = 0; i < 80; i++) {
+                v_sum += adc_buffer[start_idx + (i*2)];     
+                i_sum += adc_buffer[start_idx + (i*2) + 1]; 
             }
-            double v_mean = v_sum / 40.0;
-            double i_mean = i_sum / 40.0;
+            double v_mean = v_sum / 80.0;
+            double i_mean = i_sum / 80.0;
 
-            // 2. Shift, Square, and Instantaneous Power
+           // 2. Shift, Square, and Instantaneous Power
             double sum_v_sq = 0, sum_i_sq = 0, sum_p_inst = 0;
-            for(int i = 0; i < 40; i++) {
+
+            for(int i = 0; i < 80; i++) {
                 double v_shifted = adc_buffer[start_idx + (i*2)] - v_mean;
                 double i_shifted = adc_buffer[start_idx + (i*2) + 1] - i_mean;
 
                 sum_v_sq += (v_shifted * v_shifted);
                 sum_i_sq += (i_shifted * i_shifted);
-                sum_p_inst += (v_shifted * i_shifted);
+                sum_p_inst += (v_shifted * i_shifted); 
             }
 
             // 3. Root Mean Square
-            double rms_v_raw = sqrt(sum_v_sq / 40.0);
-            double rms_i_raw = sqrt(sum_i_sq / 40.0);
+            double rms_v_raw = sqrt(sum_v_sq / 80.0);
+            double rms_i_raw = sqrt(sum_i_sq / 80.0);
 
-            // 4. Calibrate to Real Units
-            real_volts = rms_v_raw * 1.0; // Needs manual ZMPT101B multiplier calibration later
-            real_amps = (rms_i_raw * 3.3 / 4095.0) / 0.0925; 
+            // --- SMOOTHING FILTER ---
+            static double smoothed_v_raw = 0;
+            static double smoothed_i_raw = 0;
+            static double smoothed_p_inst = 0;
+            
+            if (smoothed_v_raw == 0) { 
+                smoothed_v_raw = rms_v_raw;
+                smoothed_i_raw = rms_i_raw;
+                smoothed_p_inst = (sum_p_inst / 80.0);
+            } else {
+                smoothed_v_raw = (smoothed_v_raw * 0.95) + (rms_v_raw * 0.05);
+                smoothed_i_raw = (smoothed_i_raw * 0.95) + (rms_i_raw * 0.05);
+                smoothed_p_inst = (smoothed_p_inst * 0.95) + ((sum_p_inst / 80.0) * 0.05);
+            }
+
+            // 4. Calibrate to Real Units (Using the SMOOTHED variables)
+            real_volts = smoothed_v_raw * 0.6557; // Calibration factor for voltage
+            real_amps = (smoothed_i_raw * 3.3 / 4095.0) / 0.0925; 
 
             // 5. Power Math
-            real_watts = (sum_p_inst / 40.0) * 1.0 * ((3.3 / 4095.0) / 0.0925); 
+            real_watts = smoothed_p_inst * 1.0 * ((3.3 / 4095.0) / 0.0925); 
             apparent_power = real_volts * real_amps;
             power_factor = (apparent_power > 0) ? (real_watts / apparent_power) : 0;
 
@@ -90,7 +106,7 @@ int main(void) {
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET); // Orange OFF
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET); // Green OFF
             } 
-            else if ((real_volts >= 190.0 && real_volts < 210.0) || (real_volts > 250.0 && real_volts <= 260.0) || (power_factor < 0.85 && real_amps > 0.1)) {
+            else if ((real_volts >= 190.0 && real_volts < 210.0) || (real_volts > 250.0 && real_volts <= 260.0)) {
                 // WARNING STRESS
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_RESET);
