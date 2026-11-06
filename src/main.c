@@ -48,36 +48,52 @@ int main(void) {
             process_first_half = 0;
             process_second_half = 0;
 
-            double v_sum = 0, i_sum = 0;
+            float v_sum = 0, i_sum = 0;
             
             // 1. Calculate dynamic DC Offset (Mean) for this exact 20ms cycle
             for(int i = 0; i < 80; i++) {
                 v_sum += adc_buffer[start_idx + (i*2)];     
                 i_sum += adc_buffer[start_idx + (i*2) + 1]; 
             }
-            double v_mean = v_sum / 80.0;
-            double i_mean = i_sum / 80.0;
+            float v_mean = v_sum / 80.0;
+            float i_mean = i_sum / 80.0;
 
-           // 2. Shift, Square, and Instantaneous Power
-            double sum_v_sq = 0, sum_i_sq = 0, sum_p_inst = 0;
+           // 2. Shift, Square, and Instantaneous Power with Phase Compensation
+            float sum_v_sq = 0, sum_i_sq = 0, sum_p_inst = 0;
+            const float phase_cal = 0.027f; // Adjust this if your ADC clock changes
 
             for(int i = 0; i < 80; i++) {
-                double v_shifted = adc_buffer[start_idx + (i*2)] - v_mean;
-                double i_shifted = adc_buffer[start_idx + (i*2) + 1] - i_mean;
+                float v_shifted_current = (float)adc_buffer[start_idx + (i*2)] - v_mean;
+                float i_shifted = (float)adc_buffer[start_idx + (i*2) + 1] - i_mean;
+                float v_shifted_next;
 
-                sum_v_sq += (v_shifted * v_shifted);
+                // Get the next voltage sample for interpolation
+                if (i < 79) {
+                    v_shifted_next = (float)adc_buffer[start_idx + ((i+1)*2)] - v_mean;
+                } else {
+                    // For the very last sample in the buffer, wrap around to the start
+                    // (Assuming the waveform is continuous, the next sample is at index 0 or BUFFER_SIZE/2)
+                    v_shifted_next = (float)adc_buffer[start_idx] - v_mean; 
+                }
+
+                // Interpolate what the voltage was at the exact microsecond the current was sampled
+                float v_aligned = v_shifted_current + ((v_shifted_next - v_shifted_current) * phase_cal);
+
+                sum_v_sq += (v_shifted_current * v_shifted_current);
                 sum_i_sq += (i_shifted * i_shifted);
-                sum_p_inst += (v_shifted * i_shifted); 
+                
+                // Calculate Active Power using the TIME-ALIGNED voltage
+                sum_p_inst += (v_aligned * i_shifted); 
             }
 
             // 3. Root Mean Square
-            double rms_v_raw = sqrt(sum_v_sq / 80.0);
-            double rms_i_raw = sqrt(sum_i_sq / 80.0);
+            float rms_v_raw = sqrtf(sum_v_sq / 80.0);
+            float rms_i_raw = sqrtf(sum_i_sq / 80.0);
 
             // --- SMOOTHING FILTER ---
-            static double smoothed_v_raw = 0;
-            static double smoothed_i_raw = 0;
-            static double smoothed_p_inst = 0;
+            static float smoothed_v_raw = 0;
+            static float smoothed_i_raw = 0;
+            static float smoothed_p_inst = 0;
             
             if (smoothed_v_raw == 0) { 
                 smoothed_v_raw = rms_v_raw;
@@ -89,14 +105,33 @@ int main(void) {
                 smoothed_p_inst = (smoothed_p_inst * 0.95) + ((sum_p_inst / 80.0) * 0.05);
             }
 
-            // 4. Calibrate to Real Units (Using the SMOOTHED variables)
-            real_volts = smoothed_v_raw * 0.6557; // Calibration factor for voltage
-            real_amps = (smoothed_i_raw * 3.3 / 4095.0) / 0.0925; 
+           // 4. Calibrate to Real Units
+            real_volts = smoothed_v_raw * 0.6557f; 
+            float raw_amps = (smoothed_i_raw * 3.3f / 4095.0f) / 0.185f; 
+
+            // --- QUADRATIC NOISE SUBTRACTION ---
+            float noise_floor_amps = 0.16f; // The exact baseline noise you see at 0W
+
+            if (raw_amps > noise_floor_amps) {
+                // Subtract the noise squared from the signal squared
+                real_amps = sqrtf((raw_amps * raw_amps) - (noise_floor_amps * noise_floor_amps));
+            } else {
+                real_amps = 0.0f; // True deadband for 0W state
+            }
 
             // 5. Power Math
-            real_watts = smoothed_p_inst * 1.0 * ((3.3 / 4095.0) / 0.0925); 
+            // Note: real_watts uses the RAW smoothed power, because the noise naturally 
+            // averages out in the instantaneous (V * I) calculation.
+            real_watts = smoothed_p_inst * 0.6557f * ((3.3f / 4095.0f) / 0.185f); 
+            
+            // Ensure real_watts doesn't show negative floating point drift at 0W
+            if (real_amps == 0.0f) real_watts = 0.0f;
+
             apparent_power = real_volts * real_amps;
             power_factor = (apparent_power > 0) ? (real_watts / apparent_power) : 0;
+            
+            // Clamp Power Factor to 1.0 (sometimes noise can push it to 1.01)
+            if (power_factor > 1.0f) power_factor = 1.0f;
 
             // 6. SMPS Protection Logic (Mapped to PA2, PA3, PA4, PA5)
             if (real_volts > 260.0 || real_volts < 190.0 || real_amps > 4.5) {
